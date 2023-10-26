@@ -1,0 +1,11 @@
+*.swp
+*.tags
+*.cscope
+*.git
+verdi*
+novas*
+*log
+dc/logs/*
+dc/outputs/*
+dc/reports/*
+dc/work/*

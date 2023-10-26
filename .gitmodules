@@ -1,0 +1,3 @@
+[submodule "cxlssd_hal_sim"]
+	path = cxlssd_hal_sim
+	url = https://github.com/DayDayKim/cxlssd_hal_sim.git
