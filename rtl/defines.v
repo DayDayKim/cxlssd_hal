@@ -1,2 +1,0 @@
-`define MAX_HOST_NUMBER     128
-`define MAX_PLANE_NUMBER    128
