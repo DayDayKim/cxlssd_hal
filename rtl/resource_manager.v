@@ -34,43 +34,67 @@ assign o_meta_data_rdy = r_meta_data_rdy;
 
 // FSM States
 parameter IDLE                          = 0;
-parameter INSERT_REQ                    = 1;
-parameter POP_REQ                       = 2;
-parameter FIND_PLANE_INSERT_STAGE       = 3;
-parameter FIND_PLANE_INSERT_STAGE2      = 4;
-parameter UPDATE_RESOURCE               = 5;
-parameter UPDATE_RESOURCE2              = 6;
-parameter BITMAP_RESET                  = 7;
-parameter UPDATE_ONLY_BIT               = 8;
-parameter FIND_PLANE_POP_STAGE          = 9;
-parameter FIND_PLANE_POP_STAGE2         = 10;
-parameter CLEAR_RESOURCE                = 11;
-parameter NO_OF_STATES                  = 12;
+parameter PLANE_EMPTY_CHECK             = 1;
+parameter UPDATE_ONLY_BITMAP            = 2;
+parameter READ_FROM_ARRAY               = 3;
+parameter CHECK_HOST_ID_FOR_FIRST       = 4;
+parameter READ_FROM_LIST                = 5;
+parameter CHECK_HOST_ID_FROM_LIST       = 6;
+parameter UPDATE_INSERT_INDEX           = 7;
+parameter UPDATE_SRAM_BITMAP            = 8;
+parameter POP_REQ                       = 9;
+parameter READ_FOR_POP_FIRST            = 10;
+parameter FIND_HOST_ID_FOR_FIRST        = 11;
+parameter READ_FOR_POP                  = 12;
+parameter FIND_HOST_ID_FROM_LIST        = 13;
+parameter BITMAP_RESET                  = 14;
+parameter NO_OF_STATES                  = 15;
 
 reg [NO_OF_STATES-1:0] curr_state;
 reg [NO_OF_STATES-1:0] next_state;
 
 // SRAM for LL
 /*
-* 1bit  -           53bit                    - 10bit
 * Valid - Meta(Host ID, Page Number and etc  - Addr
 * */
 // register for each plane's address
+parameter VALID_BIT_OFFSET              = SRAM_ADDR_WIDTH;
+reg     [SRAM_ADDR_WIDTH:0] r_plane_addr_arr [MAX_PLANE_NUMBER-1:0];
 reg     [NO_OF_TAG-1:0] r_sram_bitmap;
 wire    [SRAM_ADDR_WIDTH-1:0] w_sram_bitindex;
-reg     [SRAM_ADDR_WIDTH:0] r_plane_addr_arr [MAX_PLANE_NUMBER-1:0];
+reg     [SRAM_ADDR_WIDTH-1:0] r_write_addr;
+reg     [SRAM_ADDR_WIDTH-1:0] r_read_addr;
+reg     [SRAM_ADDR_WIDTH-1:0] r_read_addr_old;
+reg     [SRAM_DATA_BIT_WIDTH-1:0] r_write_data;
 reg     r_write_req;
 reg     r_read_req;
-reg     [SRAM_ADDR_WIDTH-1:0] r_write_addr;
-reg     [SRAM_ADDR_WIDTH-1:0] r_last_insert_addr;
-reg     [SRAM_ADDR_WIDTH-1:0] r_need_insert_addr;
-reg     [SRAM_ADDR_WIDTH-1:0] r_read_addr;
-reg     [SRAM_DATA_BIT_WIDTH-1:0] r_write_data;
 reg     [SRAM_DATA_BIT_WIDTH-1:0] r_read_data;
-reg     [SRAM_DATA_BIT_WIDTH-1:0] r_last_read_data;
+reg     [SRAM_DATA_BIT_WIDTH-1:0] r_read_data_old;
 wire    [SRAM_DATA_BIT_WIDTH-1:0] w_read_data;
 
-genvar i;
+reg     [SRAM_ADDR_WIDTH-1:0] r_last_insert_addr;
+reg     [SRAM_ADDR_WIDTH-1:0] r_need_insert_addr;
+reg     [SRAM_ADDR_WIDTH-1:0] r_sram_update_addr;
+
+always@ (posedge i_clk or negedge i_rst_n)
+begin
+    if (~i_rst_n)
+    begin
+        r_read_data <= 'h0;
+        r_read_data_old <= 'h0;
+        r_read_addr_old <= 'h0;
+    end
+    else
+    begin
+        r_read_data <= w_read_data;
+        r_read_data_old <= r_read_data;
+        r_read_addr_old <= r_read_addr;
+    end
+end
+
+
+integer i;
+
 // FSM Control (Sequential Logic)
 always@ (posedge i_clk or negedge i_rst_n)
 begin
@@ -94,74 +118,126 @@ begin
             r_read_req = 1'b0;
             r_meta_data_rdy = 1'b0;
         end
-        curr_state[INSERT_REQ]:
+        curr_state[PLANE_EMPTY_CHECK]:
         begin
-            r_write_addr = w_sram_bitindex;
-            r_last_insert_addr = w_sram_bitindex;
-            r_write_req = 1'b1;
-            r_write_data = {{1'b1},i_meta_data,i_host_id_0,{(SRAM_ADDR_WIDTH){1'b1}}};
-        end
-        curr_state[FIND_PLANE_INSERT_STAGE]:
-        begin
-            r_write_req = 1'b0;
-            if (r_plane_addr_arr[i_plane_id_0][SRAM_ADDR_WIDTH])
+            if (r_plane_addr_arr[i_plane_id_0][VALID_BIT_OFFSET])
             begin
-                r_need_insert_addr = r_read_addr;
                 r_read_addr = r_plane_addr_arr[i_plane_id_0][SRAM_ADDR_WIDTH-1:0];
+                r_need_insert_addr = r_plane_addr_arr[i_plane_id_0][SRAM_ADDR_WIDTH-1:0];
                 r_read_req = 1'b1;
             end
-            r_sram_bitmap[r_last_insert_addr] = 1'b1;
-        end
-        curr_state[FIND_PLANE_INSERT_STAGE2]:
-        begin
-            r_read_data = w_read_data;
-            if (r_read_data[SRAM_ADDR_WIDTH-1:0] != {(SRAM_ADDR_WIDTH){1'b1}})
+            else
             begin
-                if (r_read_data[SRAM_ADDR_WIDTH +:HOST_ID_BIT_WIDTH] <= i_host_id_0)
+                r_write_addr = w_sram_bitindex;
+                r_sram_update_addr = w_sram_bitindex;
+                r_write_data = {{1'b1},i_meta_data,i_host_id_0,{(SRAM_ADDR_WIDTH){1'b1}}};
+                r_write_req = 1'b1;
+            end
+        end
+        curr_state[UPDATE_ONLY_BITMAP]:
+        begin
+            r_write_req = 1'b0;
+            r_sram_bitmap[r_sram_update_addr] = 1'b1;
+            r_plane_addr_arr[i_plane_id_0]= {1'b1, r_sram_update_addr};
+        end
+        curr_state[READ_FROM_ARRAY]:
+        begin
+            r_read_req = 1'b0;
+        end
+        curr_state[CHECK_HOST_ID_FOR_FIRST]:
+        begin
+            if (r_read_data[SRAM_ADDR_WIDTH +:HOST_ID_BIT_WIDTH] <= i_host_id_0) // until end of same host id
+            begin
+                if (r_read_data[SRAM_ADDR_WIDTH-1:0] != {(SRAM_ADDR_WIDTH){1'b1}}) // Not end of list
                 begin
-                    r_need_insert_addr = r_read_addr;
+                    // Need to read more
+                    r_need_insert_addr = r_read_addr_old;
+                    r_last_insert_addr = r_read_data[SRAM_ADDR_WIDTH-1:0];
+                    r_read_addr = r_read_data[SRAM_ADDR_WIDTH-1:0];
+                    r_read_req = 1'b1;
+                end
+                else // End of list
+                begin
+                    // Update read list
+                    r_last_insert_addr = {(SRAM_ADDR_WIDTH){1'b1}};
+                    r_write_addr = r_read_addr;
+                    r_write_data = {r_read_data[SRAM_DATA_BIT_WIDTH-1:SRAM_ADDR_WIDTH], w_sram_bitindex};
+                    r_write_req = 1'b1;
+                end
+            end
+            else
+            begin
+                // Update plane register & only write inserted list
+                r_last_insert_addr = r_read_addr;
+                r_plane_addr_arr[i_plane_id_0]= {1'b1, w_sram_bitindex};
+            end
+        end
+        curr_state[READ_FROM_LIST]:
+        begin
+            r_read_req = 1'b0;
+        end
+        curr_state[CHECK_HOST_ID_FROM_LIST]:
+        begin
+            if (r_read_data[SRAM_ADDR_WIDTH-1:0] != {(SRAM_ADDR_WIDTH){1'b1}}) // Not end of list
+            begin
+                if (r_read_data[SRAM_ADDR_WIDTH +:HOST_ID_BIT_WIDTH] <= i_host_id_0) // until end of same host id
+                begin
+                    // Need to read more
+                    r_need_insert_addr = r_read_addr_old;
+                    r_last_insert_addr = r_read_data[SRAM_ADDR_WIDTH-1:0];
                     r_read_addr = r_read_data[SRAM_ADDR_WIDTH-1:0];
                     r_read_req = 1'b1;
                 end
                 else
                 begin
-                    r_read_req = 1'b0;
+                    // Update read list
+                    r_write_addr = r_need_insert_addr;
+                    r_write_data = {r_read_data_old[SRAM_DATA_BIT_WIDTH-1:SRAM_ADDR_WIDTH], w_sram_bitindex};
+                    r_write_req = 1'b1;
                 end
             end
-            else
+            else // End of list
             begin
-                r_read_req = 1'b0;
+                // Update read list
+                if (r_read_data[SRAM_ADDR_WIDTH +:HOST_ID_BIT_WIDTH] <= i_host_id_0)
+                begin
+                    r_write_addr = r_read_addr;
+                    r_last_insert_addr = {(SRAM_ADDR_WIDTH){1'b1}};
+                    r_write_data = {r_read_data[SRAM_DATA_BIT_WIDTH-1:SRAM_ADDR_WIDTH], w_sram_bitindex};
+                    r_write_req = 1'b1;
+                end
+                else
+                begin
+                    r_write_addr = r_need_insert_addr;
+                    r_write_data = {r_read_data_old[SRAM_DATA_BIT_WIDTH-1:SRAM_ADDR_WIDTH], w_sram_bitindex};
+                    r_write_req = 1'b1;
+                end
             end
         end
-        curr_state[UPDATE_ONLY_BIT]:
+        curr_state[UPDATE_INSERT_INDEX]:
         begin
-            r_plane_addr_arr[i_plane_id_0]= {1'b1, r_last_insert_addr};
-        end
-        curr_state[UPDATE_RESOURCE]:
-        begin
-            // Update Prior
-            r_write_addr = r_need_insert_addr;
-            r_write_data = {r_read_data[SRAM_DATA_BIT_WIDTH-1:SRAM_ADDR_WIDTH], r_last_insert_addr};
+            r_write_addr = w_sram_bitindex;
+            r_sram_update_addr = w_sram_bitindex;
+            r_write_data = {{1'b1},i_meta_data,i_host_id_0,r_last_insert_addr};
             r_write_req = 1'b1;
         end
-        curr_state[UPDATE_RESOURCE2]:
+        curr_state[UPDATE_SRAM_BITMAP]:
         begin
-            // Update Current
             r_write_req = 1'b0;
-            r_write_addr = r_last_insert_addr;
-            r_write_data = {{1'b1},i_meta_data,i_host_id_0,r_read_data[SRAM_ADDR_WIDTH-1:0]};
-            r_write_req = 1'b1;
+            r_sram_bitmap[r_sram_update_addr] = 1'b1;
         end
         curr_state[POP_REQ]:
         begin
             r_read_addr = r_plane_addr_arr[i_plane_id_1][SRAM_ADDR_WIDTH-1:0];
-            r_need_insert_addr = r_read_addr;
-            r_read_req = 1'd1;
+            r_read_req = 1'b1;
         end
-        curr_state[FIND_PLANE_POP_STAGE]:
+        curr_state[READ_FOR_POP_FIRST]:
         begin
-            r_read_data = w_read_data;
-            if (r_read_data[SRAM_ADDR_WIDTH +:HOST_ID_BIT_WIDTH] == i_host_id_1)
+            r_read_req = 1'b0;
+        end
+        curr_state[FIND_HOST_ID_FOR_FIRST]:
+        begin
+            if (r_read_data[SRAM_ADDR_WIDTH+:HOST_ID_BIT_WIDTH] == i_host_id_1)
             begin
                 if (r_read_data[SRAM_ADDR_WIDTH-1:0] == {(SRAM_ADDR_WIDTH){1'b1}})
                 begin
@@ -171,62 +247,46 @@ begin
                 begin
                     r_plane_addr_arr[i_plane_id_1] = {1'b1, r_read_data[SRAM_ADDR_WIDTH-1:0]};
                 end
-                r_sram_bitmap[r_need_insert_addr] = 1'b0;
+                r_sram_bitmap[r_read_addr] = 1'b0;
                 r_meta_data = r_read_data[SRAM_ADDR_WIDTH+HOST_ID_BIT_WIDTH+:META_DATA_BIT_WIDTH];
                 r_meta_data_rdy = 1'b1;
-                r_read_req = 1'b0;
             end
             else
             begin
-                r_last_insert_addr = r_read_addr;
-                r_last_read_data = r_read_data;
+                r_need_insert_addr = r_read_addr_old;
                 r_read_addr = r_read_data[SRAM_ADDR_WIDTH-1:0];
                 r_read_req = 1'b1;
             end
         end
-        curr_state[FIND_PLANE_POP_STAGE2]:
+        curr_state[READ_FOR_POP]:
         begin
-            r_read_data = w_read_data;
-            if (r_read_data[SRAM_ADDR_WIDTH +:HOST_ID_BIT_WIDTH] < i_host_id_1)
+            r_read_req = 1'b0;
+        end
+        curr_state[FIND_HOST_ID_FROM_LIST]:
+        begin
+            if (r_read_data[SRAM_ADDR_WIDTH+:HOST_ID_BIT_WIDTH] < i_host_id_1)
             begin
-                r_last_insert_addr = r_read_addr;
-                r_last_read_data = r_read_data;
+                r_need_insert_addr = r_read_addr_old;
                 r_read_addr = r_read_data[SRAM_ADDR_WIDTH-1:0];
                 r_read_req = 1'b1;
             end
-            else if (r_read_data[SRAM_ADDR_WIDTH +:HOST_ID_BIT_WIDTH] == i_host_id_1)
+            else
             begin
-                r_read_req = 1'b0;
+                r_write_addr = r_need_insert_addr;
+                r_write_data = {r_read_data_old[SRAM_DATA_BIT_WIDTH-1:SRAM_ADDR_WIDTH], r_read_data[SRAM_ADDR_WIDTH-1:0]};
+                r_write_req = 1'b1;
+                r_sram_bitmap[r_read_addr] = 1'b0;
+                r_meta_data = r_read_data[SRAM_ADDR_WIDTH+HOST_ID_BIT_WIDTH+:META_DATA_BIT_WIDTH];
+                r_meta_data_rdy = 1'b1;
             end
-        end
-        curr_state[CLEAR_RESOURCE]:
-        begin
-            r_write_addr = r_last_insert_addr;
-            r_write_data = {r_last_read_data[SRAM_DATA_BIT_WIDTH-1:SRAM_ADDR_WIDTH],r_read_data[SRAM_ADDR_WIDTH-1:0]};
-            r_write_req = 1'b1;
-            r_sram_bitmap[r_read_addr] = 1'b0;
-            r_meta_data = r_read_data[SRAM_ADDR_WIDTH+HOST_ID_BIT_WIDTH+:META_DATA_BIT_WIDTH];
-            r_meta_data_rdy = 1'b1;
         end
         curr_state[BITMAP_RESET]:
         begin
             r_sram_bitmap = 'd0;
-            r_plane_addr_arr[0] = 'd0;
-            r_plane_addr_arr[1] = 'd0;
-            r_plane_addr_arr[2] = 'd0;
-            r_plane_addr_arr[3] = 'd0;
-            r_plane_addr_arr[4] = 'd0;
-            r_plane_addr_arr[5] = 'd0;
-            r_plane_addr_arr[6] = 'd0;
-            r_plane_addr_arr[7] = 'd0;
-            r_plane_addr_arr[8] = 'd0;
-            r_plane_addr_arr[9] = 'd0;
-            r_plane_addr_arr[10] = 'd0;
-            r_plane_addr_arr[11] = 'd0;
-            r_plane_addr_arr[12] = 'd0;
-            r_plane_addr_arr[13] = 'd0;
-            r_plane_addr_arr[14] = 'd0;
-            r_plane_addr_arr[15] = 'd0;
+            for (i = 0; i < MAX_PLANE_NUMBER + 1; i = i + 1)
+            begin
+                r_plane_addr_arr[i] = 'd0;
+            end
         end
         default:
         begin
@@ -243,95 +303,121 @@ begin
         begin
             if (i_insert_req)
             begin
-                next_state[INSERT_REQ] = 1'b1;
-            end
-            else if (i_pop_req)
-            begin
-                next_state[POP_REQ] = 1'b1;
+                next_state[PLANE_EMPTY_CHECK] = 1'b1;
             end
             else if (i_bitmap_rst_req)
             begin
                 next_state[BITMAP_RESET] = 1'b1;
             end
+            else if (i_pop_req)
+            begin
+                next_state[POP_REQ] = 1'b1;
+            end
             else
             begin
                 next_state[IDLE] = 1'b1;
             end
         end
-        curr_state[INSERT_REQ]:
+        curr_state[PLANE_EMPTY_CHECK]:
         begin
-            next_state[FIND_PLANE_INSERT_STAGE] = 1'b1;
-        end
-        curr_state[POP_REQ]:
-        begin
-            next_state[FIND_PLANE_POP_STAGE] = 1'b1;
-        end
-        curr_state[FIND_PLANE_INSERT_STAGE]:
-        begin
-            if (r_plane_addr_arr[i_plane_id_0][SRAM_ADDR_WIDTH])
+            if (r_plane_addr_arr[i_plane_id_0][VALID_BIT_OFFSET])
             begin
-                next_state[FIND_PLANE_INSERT_STAGE2] = 1'b1;
+                next_state[READ_FROM_ARRAY] = 1'b1;
             end
             else
             begin
-                next_state[UPDATE_ONLY_BIT] = 1'b1;
+                next_state[UPDATE_ONLY_BITMAP] = 1'b1;
             end
         end
-        curr_state[UPDATE_ONLY_BIT]:
+        curr_state[UPDATE_ONLY_BITMAP]:
         begin
             next_state[IDLE] = 1'b1;
         end
-        curr_state[FIND_PLANE_INSERT_STAGE2]:
+        curr_state[READ_FROM_ARRAY]:
+        begin
+            next_state[CHECK_HOST_ID_FOR_FIRST] = 1'b1;
+        end
+        curr_state[CHECK_HOST_ID_FOR_FIRST]:
+        begin
+            if (r_read_data[SRAM_ADDR_WIDTH +:HOST_ID_BIT_WIDTH] <= i_host_id_0)
+            begin
+                if (r_read_data[SRAM_ADDR_WIDTH-1:0] != {(SRAM_ADDR_WIDTH){1'b1}})
+                begin
+                    next_state[READ_FROM_LIST] = 1'b1;
+                end
+                else
+                begin
+                    next_state[UPDATE_INSERT_INDEX] = 1'b1;
+                end
+            end
+            else
+            begin
+                next_state[UPDATE_INSERT_INDEX] = 1'b1;
+            end
+        end
+        curr_state[READ_FROM_LIST]:
+        begin
+            next_state[CHECK_HOST_ID_FROM_LIST] = 1'b1;
+        end
+        curr_state[CHECK_HOST_ID_FROM_LIST]:
         begin
             if (r_read_data[SRAM_ADDR_WIDTH-1:0] != {(SRAM_ADDR_WIDTH){1'b1}})
             begin
                 if (r_read_data[SRAM_ADDR_WIDTH +:HOST_ID_BIT_WIDTH] <= i_host_id_0)
                 begin
-                    next_state[FIND_PLANE_INSERT_STAGE2] = 1'b1;
+                    next_state[READ_FROM_LIST] = 1'b1;
                 end
                 else
                 begin
-                    next_state[UPDATE_RESOURCE] = 1'b1;
+                    next_state[UPDATE_INSERT_INDEX] = 1'b1;
                 end
             end
             else
             begin
-                next_state[UPDATE_RESOURCE] = 1'b1;
+                next_state[UPDATE_INSERT_INDEX] = 1'b1;
             end
         end
-        curr_state[UPDATE_RESOURCE]:
+        curr_state[UPDATE_INSERT_INDEX]:
         begin
-            next_state[UPDATE_RESOURCE2] = 1'b1;
+            next_state[UPDATE_SRAM_BITMAP] = 1'b1;
         end
-        curr_state[UPDATE_RESOURCE2]:
+        curr_state[UPDATE_SRAM_BITMAP]:
         begin
             next_state[IDLE] = 1'b1;
         end
-        curr_state[FIND_PLANE_POP_STAGE]:
+        curr_state[POP_REQ]:
         begin
-            if (r_read_data[SRAM_ADDR_WIDTH +:HOST_ID_BIT_WIDTH] == i_host_id_1)
+            next_state[READ_FOR_POP_FIRST] = 1'b1;
+        end
+        curr_state[READ_FOR_POP_FIRST]:
+        begin
+            next_state[FIND_HOST_ID_FOR_FIRST] = 1'b1;
+        end
+        curr_state[FIND_HOST_ID_FOR_FIRST]:
+        begin
+            if (r_read_data[SRAM_ADDR_WIDTH+:HOST_ID_BIT_WIDTH] == i_host_id_1)
             begin
                 next_state[IDLE] = 1'b1;
             end
             else
             begin
-                next_state[FIND_PLANE_POP_STAGE2] = 1'b1;
+                next_state[READ_FOR_POP] = 1'b1;
             end
         end
-        curr_state[FIND_PLANE_POP_STAGE2]:
+        curr_state[READ_FOR_POP]:
         begin
-            if (r_read_data[SRAM_ADDR_WIDTH +:HOST_ID_BIT_WIDTH] < i_host_id_1)
-            begin
-                next_state[FIND_PLANE_POP_STAGE2] = 1'b1;
-            end
-            else if (r_read_data[SRAM_ADDR_WIDTH +:HOST_ID_BIT_WIDTH] == i_host_id_1)
-            begin
-                next_state[CLEAR_RESOURCE] = 1'b1;
-            end
+            next_state[FIND_HOST_ID_FROM_LIST] = 1'b1;
         end
-        curr_state[CLEAR_RESOURCE]:
+        curr_state[FIND_HOST_ID_FROM_LIST]:
         begin
-            next_state[IDLE] = 1'b1;
+            if (r_read_data[SRAM_ADDR_WIDTH+:HOST_ID_BIT_WIDTH] < i_host_id_1)
+            begin
+                next_state[READ_FOR_POP] = 1'b1;
+            end
+            else
+            begin
+                next_state[IDLE] = 1'b1;
+            end
         end
         curr_state[BITMAP_RESET]:
         begin
